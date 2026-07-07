@@ -1,0 +1,520 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Snelweg A1 — Internetverkeer</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Overpass:wght@400;600;800&family=Overpass+Mono:wght@400;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --nacht: #04060f;
+    --neon: #00e5ff;
+    --neon-dim: rgba(0,229,255,.45);
+    --magenta: #ff2d95;
+    --glas: rgba(6,12,28,.6);
+    --tekst: #e8f6ff;
+    --mono: "Overpass Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+    --sans: "Overpass", "Segoe UI", system-ui, sans-serif;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; overflow: hidden; background: var(--nacht); }
+  body { font-family: var(--sans); color: var(--tekst); }
+  canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+
+  /* ---- holografisch dashboard ---- */
+  .bord {
+    position: absolute; top: 22px; left: 22px; z-index: 10;
+    background: var(--glas);
+    border: 1px solid var(--neon-dim);
+    border-radius: 12px;
+    padding: 14px 18px 12px;
+    min-width: 272px;
+    backdrop-filter: blur(8px);
+    box-shadow: 0 0 22px rgba(0,229,255,.18), inset 0 0 30px rgba(0,229,255,.05);
+    user-select: none;
+    overflow: hidden;
+  }
+  .bord::after { /* scanlijnen */
+    content: ""; position: absolute; inset: 0; pointer-events: none;
+    background: repeating-linear-gradient(0deg, rgba(0,229,255,.04) 0 1px, transparent 1px 4px);
+  }
+  .bord .kop { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
+  .bord .a1 {
+    color: var(--magenta); font-weight: 800; font-size: 18px;
+    padding: 1px 10px 0; border-radius: 7px; border: 1.5px solid var(--magenta);
+    letter-spacing: .5px; line-height: 1.5;
+    text-shadow: 0 0 10px var(--magenta);
+    box-shadow: 0 0 12px rgba(255,45,149,.35), inset 0 0 8px rgba(255,45,149,.2);
+  }
+  .bord h1 { font-size: 16px; font-weight: 800; letter-spacing: 1.5px; text-shadow: 0 0 12px var(--neon-dim); }
+  .bord h1 small { display: block; font-weight: 400; font-size: 10px; opacity: .75; letter-spacing: 2.5px; color: var(--neon); }
+  .rij {
+    display: flex; align-items: baseline; justify-content: space-between; gap: 18px;
+    padding: 5px 0; border-top: 1px solid rgba(0,229,255,.18);
+    font-size: 13.5px;
+  }
+  .rij .pijl { font-size: 14px; width: 16px; display: inline-block; color: var(--neon); }
+  .rij b { font-family: var(--mono); font-weight: 600; font-size: 13.5px; white-space: nowrap; color: #fff; text-shadow: 0 0 8px var(--neon-dim); }
+  .rij.totaal { font-size: 11.5px; opacity: .8; }
+  .status {
+    margin-top: 9px; padding-top: 8px; border-top: 1px solid rgba(0,229,255,.18);
+    display: flex; align-items: center; gap: 8px; font-size: 10.5px; letter-spacing: 2px;
+    text-transform: uppercase; font-weight: 600; font-family: var(--mono);
+  }
+  .lamp { width: 8px; height: 8px; border-radius: 50%; background: #555; transition: background .3s; }
+  .lamp.aan  { background: #3ddc84; box-shadow: 0 0 10px #3ddc84; }
+  .lamp.demo { background: #ffd23f; box-shadow: 0 0 10px #ffd23f; }
+  .lamp.uit  { background: #ff4757; box-shadow: 0 0 10px #ff4757; }
+
+  /* ---- legenda ---- */
+  .legenda {
+    position: absolute; right: 22px; bottom: 22px; z-index: 10;
+    background: var(--glas); backdrop-filter: blur(8px);
+    border: 1px solid rgba(0,229,255,.3); border-radius: 10px;
+    box-shadow: 0 0 18px rgba(0,229,255,.12);
+    padding: 12px 16px; font-size: 11.5px;
+    display: grid; grid-template-columns: repeat(2, auto); gap: 6px 22px;
+    user-select: none;
+  }
+  .legenda .item { display: flex; align-items: center; gap: 9px; font-family: var(--mono); }
+  .legenda .blok { width: 20px; height: 8px; border-radius: 4px; box-shadow: 0 0 9px currentColor; }
+  .legenda .aantal { opacity: .6; min-width: 4ch; text-align: right; }
+
+  /* ---- bediening ---- */
+  .knoppen { position: absolute; left: 22px; bottom: 22px; z-index: 10; display: flex; gap: 10px; }
+  button {
+    font-family: var(--mono); font-weight: 600; font-size: 12px; letter-spacing: 1px;
+    color: var(--neon); background: var(--glas);
+    border: 1px solid var(--neon-dim); border-radius: 8px;
+    padding: 9px 16px; cursor: pointer; backdrop-filter: blur(8px);
+    text-shadow: 0 0 8px var(--neon-dim);
+    box-shadow: 0 0 14px rgba(0,229,255,.12);
+    transition: box-shadow .2s, background .2s;
+  }
+  button:hover { background: rgba(0,229,255,.12); box-shadow: 0 0 20px rgba(0,229,255,.35); }
+  button:focus-visible { outline: 2px solid var(--neon); outline-offset: 2px; }
+
+  .drukte {
+    position: absolute; top: 22px; right: 22px; z-index: 10;
+    font-family: var(--mono); font-size: 11.5px; color: #ffd23f;
+    background: var(--glas); border: 1px solid rgba(255,210,63,.45);
+    border-radius: 8px; padding: 7px 12px; opacity: 0; transition: opacity .4s;
+    box-shadow: 0 0 14px rgba(255,210,63,.18);
+    user-select: none; backdrop-filter: blur(8px);
+  }
+  .drukte.zichtbaar { opacity: 1; }
+
+  @media (max-width: 640px) {
+    .bord { transform: scale(.82); transform-origin: top left; }
+    .legenda { grid-template-columns: 1fr; gap: 5px; right: 12px; bottom: 12px; }
+  }
+</style>
+</head>
+<body>
+
+<canvas id="achtergrond"></canvas>
+<canvas id="verkeer"></canvas>
+
+<aside class="bord" aria-label="Verkeersinformatie">
+  <div class="kop">
+    <span class="a1">A10</span>
+    <h1>INTERNETVERKEER<small>LIVE PAKKETSTROOM</small></h1>
+  </div>
+  <div class="rij"><span><span class="pijl">▼</span> Download</span><b id="down">0 B/s</b></div>
+  <div class="rij"><span><span class="pijl">▲</span> Upload</span><b id="up">0 B/s</b></div>
+  <div class="rij"><span>Pakketten</span><b id="pps">0 /s</b></div>
+  <div class="rij totaal"><span>Totaal sinds start</span><b id="totaal">0 pakketten</b></div>
+  <div class="status"><span class="lamp" id="lamp"></span><span id="statusTekst">Verbinden…</span></div>
+</aside>
+
+<div class="drukte" id="drukte">⚠ druk verkeer — <span id="drukteN">0</span> pakketten niet getekend</div>
+
+<div class="knoppen">
+  <button id="pauze" aria-pressed="false">⏸ PAUZEER</button>
+</div>
+
+<aside class="legenda" id="legenda" aria-label="Protocollen"></aside>
+
+<script>
+"use strict";
+
+/* ------------------------------------------------ configuratie ---------- */
+const PROTOCOLLEN = {
+  https: { kleur: "#35d07f", naam: "HTTPS" },
+  quic:  { kleur: "#b07bff", naam: "QUIC"  },
+  http:  { kleur: "#ff9f40", naam: "HTTP"  },
+  dns:   { kleur: "#ffd23f", naam: "DNS"   },
+  tcp:   { kleur: "#4fa3ff", naam: "TCP"   },
+  udp:   { kleur: "#ff6f91", naam: "UDP"   },
+  icmp:  { kleur: "#ff4757", naam: "ICMP"  },
+  other: { kleur: "#9aa0a6", naam: "Overig"},
+};
+const MAX_AUTOS = 240;
+const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+/* ------------------------------------------------ 3D-wereld -------------- */
+/* Wereldcoördinaten: x opzij (eenheden), z de diepte. De camera hangt boven
+   de weg; alles wordt geprojecteerd richting één verdwijnpunt op de horizon. */
+const Z_NEAR = 1, Z_FAR = 26;
+const STROKEN_AF  = [-6.4, -4.4, -2.4];   // linker rijbaan: tegemoetkomend = download
+const STROKEN_AAN = [ 2.4,  4.4,  6.4];   // rechter rijbaan: van je af = upload
+const WEG_RAND = 7.7, MIDDEN = 1.3;
+
+let W = 0, H = 0, dpr = 1, horizonY = 0, camY = 0, PPU = 0, cx = 0;
+
+const bgC = document.getElementById("achtergrond");
+const fgC = document.getElementById("verkeer");
+const bg = bgC.getContext("2d");
+const ctx = fgC.getContext("2d");
+
+function maat() {
+  dpr = Math.min(devicePixelRatio || 1, 1.75);
+  W = innerWidth; H = innerHeight;
+  for (const c of [bgC, fgC]) {
+    c.width = W * dpr; c.height = H * dpr;
+    c.getContext("2d").setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  horizonY = H * 0.36;
+  camY = H * 1.18;
+  cx = W / 2;
+  PPU = Math.min(W, H * 1.6) * 0.07;   // pixels per wereld-eenheid op z = Z_NEAR
+  tekenAchtergrond();
+}
+addEventListener("resize", maat);
+
+/* projectie: wereld (x, z)  →  scherm (px, py, schaal) */
+function project(x, z) {
+  const s = Z_NEAR / z;
+  return { x: cx + x * PPU * s, y: horizonY + (camY - horizonY) * s, s };
+}
+
+/* ------------------------------------------------ achtergrond ------------ */
+function tekenAchtergrond() {
+  bg.clearRect(0, 0, W, H);
+  const lucht = bg.createLinearGradient(0, 0, 0, horizonY * 1.25);
+  lucht.addColorStop(0, "#02030a");
+  lucht.addColorStop(0.72, "#0a1030");
+  lucht.addColorStop(1, "#27104a");
+  bg.fillStyle = lucht;
+  bg.fillRect(0, 0, W, horizonY + 2);
+
+  // sterren
+  for (let i = 0; i < W / 5; i++) {
+    const y = Math.random() * horizonY * 0.92;
+    bg.globalAlpha = 0.25 + Math.random() * 0.65;
+    bg.fillStyle = Math.random() > 0.85 ? "#9fdcff" : "#dfe9ff";
+    bg.fillRect(Math.random() * W, y, Math.random() > 0.9 ? 2 : 1, 1);
+  }
+  bg.globalAlpha = 1;
+
+  // datakern op het verdwijnpunt
+  const kern = bg.createRadialGradient(cx, horizonY, 0, cx, horizonY, W * 0.34);
+  kern.addColorStop(0, "rgba(0,229,255,.4)");
+  kern.addColorStop(0.25, "rgba(255,45,149,.16)");
+  kern.addColorStop(1, "rgba(255,45,149,0)");
+  bg.fillStyle = kern;
+  bg.fillRect(0, 0, W, H);
+
+  // horizonlijn
+  bg.strokeStyle = "rgba(0,229,255,.8)";
+  bg.shadowColor = "#00e5ff"; bg.shadowBlur = 12;
+  bg.lineWidth = 1.5;
+  bg.beginPath(); bg.moveTo(0, horizonY); bg.lineTo(W, horizonY); bg.stroke();
+  bg.shadowBlur = 0;
+
+  // grond-basis
+  const grond = bg.createLinearGradient(0, horizonY, 0, H);
+  grond.addColorStop(0, "#0b0820");
+  grond.addColorStop(1, "#04060f");
+  bg.fillStyle = grond;
+  bg.fillRect(0, horizonY, W, H - horizonY);
+}
+
+/* ------------------------------------------------ weg (per frame) -------- */
+let scroll = 0;   // cosmetische camerabeweging
+
+function lijnZ(x, z1, z2, kleur, breedte, gloed = 0) {
+  const a = project(x, z1), b = project(x, z2);
+  ctx.strokeStyle = kleur;
+  ctx.lineWidth = breedte;
+  if (gloed) { ctx.shadowColor = kleur; ctx.shadowBlur = gloed; }
+  ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+  ctx.shadowBlur = 0;
+}
+
+function tekenWeg() {
+  // raster naast de weg: verticale waaier + bewegende horizontale lijnen
+  ctx.strokeStyle = "rgba(0,229,255,.10)";
+  ctx.lineWidth = 1;
+  for (let x = -34; x <= 34; x += 3.6) {
+    if (Math.abs(x) < WEG_RAND + 1.5) continue;
+    const a = project(x, Z_NEAR * 0.92), b = project(x, Z_FAR * 3);
+    ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+  }
+  const stap = 2.4, off = scroll % stap;
+  for (let z = Z_NEAR + (stap - off); z < Z_FAR * 2.2; z += stap) {
+    const p = project(0, z);
+    ctx.strokeStyle = `rgba(0,229,255,${0.13 * Math.min(p.s * 2, 1)})`;
+    ctx.beginPath(); ctx.moveTo(0, p.y); ctx.lineTo(W, p.y); ctx.stroke();
+  }
+
+  // wegdek: donker trapezium boven het raster
+  const nl = project(-WEG_RAND, Z_NEAR * 0.9), nr = project(WEG_RAND, Z_NEAR * 0.9);
+  const fl = project(-WEG_RAND, Z_FAR * 4),    fr = project(WEG_RAND, Z_FAR * 4);
+  const dek = ctx.createLinearGradient(0, horizonY, 0, H);
+  dek.addColorStop(0, "rgba(10,12,26,.96)");
+  dek.addColorStop(1, "rgba(7,9,18,.96)");
+  ctx.fillStyle = dek;
+  ctx.beginPath();
+  ctx.moveTo(nl.x, nl.y); ctx.lineTo(fl.x, fl.y);
+  ctx.lineTo(fr.x, fr.y); ctx.lineTo(nr.x, nr.y);
+  ctx.closePath(); ctx.fill();
+
+  // neonranden + middenberm
+  lijnZ(-WEG_RAND, Z_NEAR * 0.9, Z_FAR * 4, "rgba(0,229,255,.85)", 2.5, 14);
+  lijnZ( WEG_RAND, Z_NEAR * 0.9, Z_FAR * 4, "rgba(0,229,255,.85)", 2.5, 14);
+  lijnZ(-MIDDEN, Z_NEAR * 0.9, Z_FAR * 4, "rgba(255,45,149,.65)", 1.8, 10);
+  lijnZ( MIDDEN, Z_NEAR * 0.9, Z_FAR * 4, "rgba(255,45,149,.65)", 1.8, 10);
+
+  // onderbroken rijstrookmarkering die meebeweegt
+  const dash = 1.5, gap = 2.2, cyclus = dash + gap, doff = scroll % cyclus;
+  ctx.lineCap = "round";
+  for (const x of [-5.4, -3.4, 3.4, 5.4]) {
+    for (let z = Z_NEAR + (cyclus - doff); z < Z_FAR * 1.6; z += cyclus) {
+      const a = project(x, z), b = project(x, Math.min(z + dash, Z_FAR * 1.6));
+      ctx.strokeStyle = `rgba(190,240,255,${0.5 * Math.min(a.s * 1.6, 1)})`;
+      ctx.lineWidth = Math.max(3.2 * a.s, 0.6);
+      ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+    }
+  }
+  ctx.lineCap = "butt";
+}
+
+/* ------------------------------------------------ voertuigen ------------- */
+const autos = [];
+const wachtrij = [];
+let nietGetekend = 0;
+const teller = Object.fromEntries(Object.keys(PROTOCOLLEN).map(k => [k, 0]));
+
+function voertuigType(bytes) {
+  if (bytes < 150)  return { br: 0.85, lg: 1.5, snel: 1.3,  vorm: "klein" };
+  if (bytes < 800)  return { br: 1.1,  lg: 2.4, snel: 1.0,  vorm: "auto"  };
+  if (bytes < 1300) return { br: 1.2,  lg: 3.4, snel: 0.85, vorm: "bus"   };
+  return                   { br: 1.35, lg: 4.8, snel: 0.72, vorm: "truck" };
+}
+
+function spawn(pkt) {
+  if (autos.length >= MAX_AUTOS) { nietGetekend++; return; }
+  const down = pkt.d === 0;
+  const stroken = down ? STROKEN_AF : STROKEN_AAN;
+  const t = voertuigType(pkt.s);
+  // snel verkeer kiest de linkerstrook (dicht bij de middenberm)
+  const volgorde = t.snel > 1 ? [0, 1, 2] : t.snel < 0.9 ? [2, 1, 0] : [1, 0, 2];
+  const startZ = down ? Z_FAR : Z_NEAR * 1.05;
+
+  for (const i of volgorde) {
+    const lane = down ? stroken[2 - i] : stroken[i];   // inhaalstrook ligt bij de middenberm
+    const botst = autos.some(a =>
+      a.lane === lane && a.down === down && Math.abs(a.z - startZ) < (a.lg + t.lg) * 0.7 + 0.8);
+    if (!botst) {
+      const basis = (4.5 + Math.random() * 1.4) * t.snel * (1 + i * 0.12)
+                  * (reducedMotion ? 0.45 : 1);
+      autos.push({
+        lane, z: startZ, down,
+        v: basis * (down ? 1.45 : 1),     // tegenliggers passeren sneller (eigen + camerasnelheid)
+        br: t.br, lg: t.lg, vorm: t.vorm,
+        kleur: (PROTOCOLLEN[pkt.p] || PROTOCOLLEN.other).kleur,
+      });
+      teller[pkt.p in PROTOCOLLEN ? pkt.p : "other"]++;
+      return;
+    }
+  }
+  if (wachtrij.length < 140) wachtrij.push(pkt); else nietGetekend++;
+}
+
+function tekenAuto(a) {
+  const p = project(a.lane, a.z);
+  if (p.s < 0.045) {  // heel ver weg: gloeiende stip
+    ctx.fillStyle = a.kleur;
+    ctx.globalAlpha = 0.8;
+    ctx.beginPath(); ctx.arc(p.x, p.y, 1.4, 0, 7); ctx.fill();
+    ctx.globalAlpha = 1;
+    return;
+  }
+
+  const br = a.br * PPU * p.s;
+  const lg = a.lg * PPU * p.s * 0.55;        // diepte verkort de lengte op het scherm
+  const x = p.x - br / 2, y = p.y - lg;
+
+  // lichtspoor achter het voertuig
+  const trailZ = a.z + (a.down ? 2.6 : -1.4) * a.lg * 0.45;
+  const tp = project(a.lane, Math.max(trailZ, Z_NEAR * 0.92));
+  const trail = ctx.createLinearGradient(p.x, p.y, tp.x, tp.y);
+  trail.addColorStop(0, a.kleur + "99");
+  trail.addColorStop(1, a.kleur + "00");
+  ctx.strokeStyle = trail;
+  ctx.lineWidth = Math.max(br * 0.32, 1);
+  ctx.lineCap = "round";
+  ctx.beginPath(); ctx.moveTo(p.x, p.y - lg * 0.4); ctx.lineTo(tp.x, tp.y); ctx.stroke();
+  ctx.lineCap = "butt";
+
+  // neon-onderglans op het wegdek
+  ctx.fillStyle = a.kleur;
+  ctx.globalAlpha = 0.32;
+  ctx.beginPath();
+  ctx.ellipse(p.x, p.y + br * 0.08, br * 0.78, br * 0.26, 0, 0, 7);
+  ctx.fill();
+  ctx.globalAlpha = 1;
+
+  // carrosserie: donkere romp met neoncontour
+  ctx.shadowColor = a.kleur;
+  ctx.shadowBlur = Math.min(14 * p.s * 2, 14);
+  ctx.fillStyle = "#0a0d16";
+  ctx.strokeStyle = a.kleur;
+  ctx.lineWidth = Math.max(1.4 * p.s * 2, 0.8);
+  ctx.beginPath();
+  ctx.roundRect(x, y, br, lg, br * 0.28);
+  ctx.fill(); ctx.stroke();
+  ctx.shadowBlur = 0;
+
+  // cockpit / cabine-accent
+  ctx.fillStyle = "rgba(160,235,255,.28)";
+  if (a.vorm === "truck") {
+    const cabH = lg * 0.2;
+    ctx.fillRect(x + br * 0.16, a.down ? y + lg - cabH - br * 0.1 : y + br * 0.1, br * 0.68, cabH);
+    ctx.strokeStyle = a.kleur + "66";
+    ctx.beginPath();
+    ctx.moveTo(x + br * 0.1, a.down ? y + lg - cabH * 1.6 : y + cabH * 1.6);
+    ctx.lineTo(x + br * 0.9, a.down ? y + lg - cabH * 1.6 : y + cabH * 1.6);
+    ctx.stroke();
+  } else {
+    ctx.beginPath();
+    ctx.roundRect(x + br * 0.18, y + lg * 0.32, br * 0.64, lg * 0.34, br * 0.18);
+    ctx.fill();
+  }
+
+  // verlichting: tegenliggers tonen koplampen, uitgaand verkeer achterlichten
+  const lampY = a.down ? y + lg - br * 0.14 : y + lg - br * 0.14;
+  const lampR = Math.max(br * 0.1, 1);
+  if (a.down) {
+    ctx.fillStyle = "#fff7d6";
+    ctx.shadowColor = "#fff7d6"; ctx.shadowBlur = 10 * p.s * 2;
+  } else {
+    ctx.fillStyle = "#ff3b30";
+    ctx.shadowColor = "#ff3b30"; ctx.shadowBlur = 8 * p.s * 2;
+  }
+  ctx.beginPath(); ctx.arc(x + br * 0.22, lampY, lampR, 0, 7); ctx.fill();
+  ctx.beginPath(); ctx.arc(x + br * 0.78, lampY, lampR, 0, 7); ctx.fill();
+  ctx.shadowBlur = 0;
+
+  // koplampgloed van dichtbije tegenliggers op het asfalt
+  if (a.down && p.s > 0.42 && !reducedMotion) {
+    const gl = ctx.createRadialGradient(p.x, p.y + lg * 0.3, 2, p.x, p.y + lg * 0.3, br * 2.4);
+    gl.addColorStop(0, "rgba(255,247,214,.14)");
+    gl.addColorStop(1, "rgba(255,247,214,0)");
+    ctx.fillStyle = gl;
+    ctx.fillRect(p.x - br * 2.4, p.y - lg, br * 4.8, lg * 3.2);
+  }
+}
+
+/* ------------------------------------------------ animatielus ------------ */
+let gepauzeerd = false;
+let vorige = performance.now();
+
+function frame(nu) {
+  requestAnimationFrame(frame);
+  const dt = Math.min((nu - vorige) / 1000, 0.05);
+  vorige = nu;
+  if (gepauzeerd) return;
+
+  if (!reducedMotion) scroll += dt * 6.5;
+  for (let i = 0; i < 6 && wachtrij.length; i++) spawn(wachtrij.shift());
+
+  ctx.clearRect(0, 0, W, H);
+  tekenWeg();
+
+  for (const a of autos) a.z += a.down ? -a.v * dt : a.v * dt;
+  for (let i = autos.length - 1; i >= 0; i--) {
+    const a = autos[i];
+    if ((a.down && a.z < Z_NEAR * 0.55) || (!a.down && a.z > Z_FAR)) autos.splice(i, 1);
+  }
+  autos.sort((a, b) => b.z - a.z);          // ver eerst, dichtbij eroverheen
+  for (const a of autos) tekenAuto(a);
+}
+
+/* ------------------------------------------------ legenda & HUD ---------- */
+const legendaEl = document.getElementById("legenda");
+for (const [k, p] of Object.entries(PROTOCOLLEN)) {
+  legendaEl.insertAdjacentHTML("beforeend",
+    `<div class="item"><span class="blok" style="background:${p.kleur};color:${p.kleur}"></span>
+     <span>${p.naam}</span><span class="aantal" id="n-${k}">0</span></div>`);
+}
+setInterval(() => {
+  for (const k of Object.keys(PROTOCOLLEN))
+    document.getElementById("n-" + k).textContent = teller[k].toLocaleString("nl-NL");
+}, 800);
+
+const fmt = n => {
+  if (n >= 1e9) return (n / 1e9).toLocaleString("nl-NL", { maximumFractionDigits: 1 }) + " GB";
+  if (n >= 1e6) return (n / 1e6).toLocaleString("nl-NL", { maximumFractionDigits: 1 }) + " MB";
+  if (n >= 1e3) return (n / 1e3).toLocaleString("nl-NL", { maximumFractionDigits: 1 }) + " kB";
+  return Math.round(n) + " B";
+};
+
+let vorigeStats = null, vorigeTijd = 0;
+function updateHUD(s) {
+  const nu = performance.now();
+  if (vorigeStats) {
+    const sec = Math.max((nu - vorigeTijd) / 1000, 0.2);
+    document.getElementById("down").textContent = fmt((s.in_bytes  - vorigeStats.in_bytes)  / sec) + "/s";
+    document.getElementById("up").textContent   = fmt((s.out_bytes - vorigeStats.out_bytes) / sec) + "/s";
+  }
+  vorigeStats = s; vorigeTijd = nu;
+  document.getElementById("pps").textContent = s.pps.toLocaleString("nl-NL") + " /s";
+  document.getElementById("totaal").textContent =
+    s.pkts.toLocaleString("nl-NL") + " pakketten · " + fmt(s.in_bytes + s.out_bytes);
+}
+
+const drukteEl = document.getElementById("drukte");
+setInterval(() => {
+  if (nietGetekend > 0) {
+    document.getElementById("drukteN").textContent = nietGetekend.toLocaleString("nl-NL");
+    drukteEl.classList.add("zichtbaar");
+  } else {
+    drukteEl.classList.remove("zichtbaar");
+  }
+  nietGetekend = Math.max(0, nietGetekend - 200);
+}, 1000);
+
+/* ------------------------------------------------ verbinding ------------- */
+const lamp = document.getElementById("lamp");
+const statusTekst = document.getElementById("statusTekst");
+const bron = new EventSource("/events");
+
+bron.onopen = () => { lamp.className = "lamp aan"; statusTekst.textContent = "Live verbonden"; };
+bron.onerror = () => { lamp.className = "lamp uit"; statusTekst.textContent = "Verbinding verbroken — opnieuw proberen…"; };
+bron.onmessage = e => {
+  const m = JSON.parse(e.data);
+  if (m.mode) {
+    if (m.mode === "demo") { lamp.className = "lamp demo"; statusTekst.textContent = "Demo-verkeer (gesimuleerd)"; }
+    return;
+  }
+  if (m.stats) updateHUD(m.stats);
+  if (m.skipped) nietGetekend += m.skipped;
+  if (m.packets && !gepauzeerd) for (const p of m.packets) spawn(p);
+};
+
+/* ------------------------------------------------ bediening -------------- */
+const pauzeKnop = document.getElementById("pauze");
+pauzeKnop.addEventListener("click", () => {
+  gepauzeerd = !gepauzeerd;
+  pauzeKnop.textContent = gepauzeerd ? "▶ HERVAT" : "⏸ PAUZEER";
+  pauzeKnop.setAttribute("aria-pressed", String(gepauzeerd));
+});
+
+maat();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

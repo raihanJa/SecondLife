@@ -1,0 +1,6 @@
+pygame>=2.5.0
+psutil>=5.9.0
+
+# Optional: only needed if you enable "Network live capture" in Settings
+# (Network Highway otherwise runs on synthetic demo traffic, no extra deps).
+# scapy>=2.5.0

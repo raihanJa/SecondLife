@@ -27,8 +27,10 @@ def _load_scene_classes(smoke_scene_only=None):
     from scenes.city_pulse.scene import CityPulseScene
     from scenes.living_forest.scene import LivingForestScene
     from scenes.network_highway.scene import NetworkHighwayScene
-    all_scenes = [CityPulseScene, LivingForestScene, NetworkHighwayScene]
-    if smoke_scene_only:
+    from scenes.multi_view.scene import MultiViewScene
+    all_scenes = [CityPulseScene, LivingForestScene, NetworkHighwayScene, MultiViewScene]
+    # multi_view composites the other worlds, so it needs them all present.
+    if smoke_scene_only and smoke_scene_only != MultiViewScene.id:
         return [s for s in all_scenes if s.id == smoke_scene_only]
     return all_scenes
 
@@ -55,7 +57,8 @@ class App:
         self.scene_manager.register(LauncherScene)
         for cls in self.available_scenes:
             self.scene_manager.register(cls)
-        self.showcase = ShowcaseController(self, [c.id for c in self.available_scenes])
+        showcase_ids = [c.id for c in self.available_scenes if c.id != "multi_view"]
+        self.showcase = ShowcaseController(self, showcase_ids)
 
         start_id = smoke[0] if smoke else LAUNCHER_ID
         self.scene_manager.start(start_id)

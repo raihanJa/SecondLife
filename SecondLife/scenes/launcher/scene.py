@@ -52,6 +52,11 @@ class LauncherScene(Scene):
         w, h = self.reference_size
         card_w, card_h = 300, 380
         gap = 40
+        max_w = w - 80  # keep a margin on both sides
+        if n * card_w + (n - 1) * gap > max_w:
+            gap = 24
+            if n * card_w + (n - 1) * gap > max_w:
+                card_w = (max_w - (n - 1) * gap) // n
         total_w = n * card_w + (n - 1) * gap
         x0 = (w - total_w) // 2
         y = h // 2 - card_h // 2 - 20

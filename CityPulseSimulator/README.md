@@ -57,8 +57,8 @@ pyinstaller CityPulseSimulator.spec
 ```
 
 The executable is written to `dist/CityPulseSimulator.exe`. Pushing a
-tag like `v1.0.0` also triggers a GitHub Actions build that attaches
-the .exe to the corresponding release automatically.
+tag like `citypulse-v1.0.0` also triggers a GitHub Actions build that
+attaches the .exe to the corresponding release automatically.
 
 ## Controls
 

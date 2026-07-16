@@ -1,10 +1,14 @@
-name: Build Windows executable
+name: Build CityPulseSimulator Windows executable
 
 on:
   push:
     tags:
-      - "v*.*.*"
+      - "citypulse-v*.*.*"
   workflow_dispatch:
+
+defaults:
+  run:
+    working-directory: CityPulseSimulator
 
 jobs:
   build:
@@ -28,10 +32,10 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: CityPulseSimulator-windows
-          path: dist/CityPulseSimulator.exe
+          path: CityPulseSimulator/dist/CityPulseSimulator.exe
 
       - name: Attach to GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/CityPulseSimulator.exe
+          files: CityPulseSimulator/dist/CityPulseSimulator.exe

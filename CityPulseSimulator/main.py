@@ -232,8 +232,10 @@ class MetricsProvider:
 
 
 class GpuMetrics:
-    """GPU load / temperature / VRAM. Prefers NVML (nvidia-ml-py); falls
-    back to polling nvidia-smi on a background thread; else unavailable."""
+    """GPU load / temperature / VRAM. Tries, in order: NVML (NVIDIA via
+    nvidia-ml-py), ADL (AMD via pyadl - no VRAM there, so vram_total
+    stays 0), then background-thread polls of nvidia-smi or rocm-smi.
+    Unavailable if none of those respond."""
 
     SAMPLE_EVERY = 1.0
 
@@ -241,31 +243,74 @@ class GpuMetrics:
         self.util = 0.0          # %
         self.temp = 0.0          # degrees C
         self.vram_used = 0.0     # bytes
-        self.vram_total = 0.0
+        self.vram_total = 0.0    # 0 -> VRAM unknown for this backend
         self._timer = self.SAMPLE_EVERY   # sample immediately on first update
-        self._handle = None
-        self.available = False
-        if pynvml is not None:
-            try:
-                pynvml.nvmlInit()
-                self._handle = pynvml.nvmlDeviceGetHandleByIndex(0)
-                self.available = True
-            except Exception:
-                self._handle = None
-        if not self.available:
-            self.available = self._start_smi_thread()
+        self._sample = None      # direct sampler; threads feed fields instead
+        self.available = (self._init_nvml() or self._init_adl()
+                          or self._start_thread())
 
-    # -- nvidia-smi fallback (subprocess polled off the render thread) -------
+    # -- NVIDIA via NVML ------------------------------------------------------
 
-    def _start_smi_thread(self):
-        import shutil
-        if shutil.which("nvidia-smi") is None:
+    def _init_nvml(self):
+        if pynvml is None:
             return False
-        import threading
-        threading.Thread(target=self._smi_loop, daemon=True).start()
+        try:
+            pynvml.nvmlInit()
+            self._nvml = pynvml.nvmlDeviceGetHandleByIndex(0)
+            self._sample_nvml()
+        except Exception:
+            return False
+        self._sample = self._sample_nvml
         return True
 
-    def _smi_loop(self):
+    def _sample_nvml(self):
+        self.util = float(
+            pynvml.nvmlDeviceGetUtilizationRates(self._nvml).gpu)
+        self.temp = float(pynvml.nvmlDeviceGetTemperature(
+            self._nvml, pynvml.NVML_TEMPERATURE_GPU))
+        mem = pynvml.nvmlDeviceGetMemoryInfo(self._nvml)
+        self.vram_used = float(mem.used)
+        self.vram_total = float(mem.total)
+
+    # -- AMD via ADL (pyadl raises on import without an AMD driver) ----------
+
+    def _init_adl(self):
+        try:
+            from pyadl import ADLManager
+            devices = ADLManager.getInstance().getDevices()
+            if not devices:
+                return False
+            self._adl = devices[0]
+            self._sample_adl()
+        except Exception:
+            return False
+        self._sample = self._sample_adl
+        return True
+
+    def _sample_adl(self):
+        u = self._adl.getCurrentUsage()
+        if u is not None:
+            self.util = float(u)
+        tc = self._adl.getCurrentTemperature()
+        if tc is not None:
+            self.temp = float(tc)
+
+    # -- CLI fallbacks (subprocess polled off the render thread) -------------
+
+    def _start_thread(self):
+        import shutil
+        loop = None
+        if shutil.which("nvidia-smi"):
+            loop = self._nvidia_smi_loop
+        elif shutil.which("rocm-smi"):
+            loop = self._rocm_smi_loop
+        if loop is None:
+            return False
+        import threading
+        threading.Thread(target=loop, daemon=True).start()
+        return True
+
+    def _nvidia_smi_loop(self):
         import subprocess
         import time
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -285,23 +330,56 @@ class GpuMetrics:
                 pass
             time.sleep(1.5)
 
-    # -- NVML sampling --------------------------------------------------------
+    def _rocm_smi_loop(self):
+        import subprocess
+        import time
+        while True:
+            try:
+                out = subprocess.check_output(
+                    ["rocm-smi", "--showuse", "--showtemp",
+                     "--showmeminfo", "vram", "--json"],
+                    timeout=5, text=True)
+                self._parse_rocm(out)
+            except Exception:
+                pass
+            time.sleep(1.5)
+
+    def _parse_rocm(self, text):
+        """Field names shift between rocm-smi versions; match loosely."""
+        import json
+        for card in json.loads(text).values():
+            if not isinstance(card, dict):
+                continue
+            edge = junction = None
+            for key, val in card.items():
+                try:
+                    if "GPU use" in key:
+                        self.util = float(val)
+                    elif "Temperature" in key and "edge" in key:
+                        edge = float(val)
+                    elif "Temperature" in key and "junction" in key:
+                        junction = float(val)
+                    elif "VRAM Total Memory" in key:
+                        self.vram_total = float(val)
+                    elif "VRAM Total Used" in key:
+                        self.vram_used = float(val)
+                except (TypeError, ValueError):
+                    pass
+            if edge is not None or junction is not None:
+                self.temp = edge if edge is not None else junction
+            break                # first GPU only
+
+    # -- per-frame sampling ---------------------------------------------------
 
     def update(self, dt):
-        if self._handle is None:
-            return               # smi thread (or nothing) feeds the fields
+        if self._sample is None:
+            return               # a smi thread (or nothing) feeds the fields
         self._timer += dt
         if self._timer < self.SAMPLE_EVERY:
             return
         self._timer = 0.0
         try:
-            self.util = float(
-                pynvml.nvmlDeviceGetUtilizationRates(self._handle).gpu)
-            self.temp = float(pynvml.nvmlDeviceGetTemperature(
-                self._handle, pynvml.NVML_TEMPERATURE_GPU))
-            mem = pynvml.nvmlDeviceGetMemoryInfo(self._handle)
-            self.vram_used = float(mem.used)
-            self.vram_total = float(mem.total)
+            self._sample()
         except Exception:
             pass
 
@@ -1512,8 +1590,8 @@ class HUD:
              city.gtemp_n if gpu_ok else 0.0,
              gpu_temp_color(city.gtemp_n)),
             ("GPU VRAM",
-             f"{city.gvu / gb:4.1f}/{city.gvt / gb:.1f} GB" if gpu_ok
-             else "  --",
+             f"{city.gvu / gb:4.1f}/{city.gvt / gb:.1f} GB"
+             if gpu_ok and city.gvt > 0 else "  --",
              city.gvram_n if gpu_ok else 0.0,                   GPU_COLOR),
             ("DOWNLINK",  fmt_speed(city.dl),        n["dl"],   DOWN_COLOR),
             ("UPLINK",    fmt_speed(city.ul),        n["ul"],   UP_COLOR),
@@ -1656,8 +1734,9 @@ class App:
             print("psutil unavailable - running in demo mode. "
                   "Install it with: pip install psutil")
         if not self.gpu_metrics.available:
-            print("No NVIDIA GPU telemetry found - the reactor idles cold "
-                  "in live mode. Install it with: pip install nvidia-ml-py")
+            print("No GPU telemetry found (NVIDIA or AMD) - the reactor "
+                  "idles cold in live mode. Install support with: "
+                  "pip install nvidia-ml-py pyadl")
         self.f_label = sysfont(11, bold=True)
         self.paused = False
         self.t = 0.0

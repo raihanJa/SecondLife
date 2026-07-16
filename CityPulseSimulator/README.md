@@ -58,9 +58,13 @@ Requires Python 3.9+.
   (CPU %, RAM %, network and disk I/O rates sampled twice per second,
   then smoothed for buttery animation).
 - GPU load, temperature and VRAM come from NVML via
-  [nvidia-ml-py](https://pypi.org/project/nvidia-ml-py/), with an
-  `nvidia-smi` background poll as fallback. Without an NVIDIA GPU the
-  reactor simply idles cold in live mode (demo mode still animates it).
+  [nvidia-ml-py](https://pypi.org/project/nvidia-ml-py/) on NVIDIA
+  cards, or from AMD's ADL driver library via
+  [pyadl](https://pypi.org/project/pyadl/) on AMD cards (ADL exposes no
+  VRAM figure, so that row shows `--` and the fuel rods stay dark).
+  `nvidia-smi` / `rocm-smi` background polls act as fallbacks. Without
+  any supported GPU the reactor simply idles cold in live mode (demo
+  mode still animates it).
 - If psutil isn't installed the app falls back to demo mode, which
   synthesizes evolving metrics so the city still feels alive.
 - Stress is a weighted blend of all metrics (GPU included — a heavy

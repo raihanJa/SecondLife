@@ -36,12 +36,29 @@ and a segmented stress meter.
 
 ## Install & run
 
+**Windows:** grab the latest `CityPulseSimulator.exe` from the
+[Releases](../../releases) page and run it — no Python required.
+
+**From source:**
+
 ```bash
 pip install -r requirements.txt
 python main.py
 ```
 
 Requires Python 3.9+.
+
+### Building the .exe yourself
+
+```bash
+pip install -r requirements.txt
+pip install pyinstaller
+pyinstaller CityPulseSimulator.spec
+```
+
+The executable is written to `dist/CityPulseSimulator.exe`. Pushing a
+tag like `v1.0.0` also triggers a GitHub Actions build that attaches
+the .exe to the corresponding release automatically.
 
 ## Controls
 

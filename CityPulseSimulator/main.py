@@ -9,6 +9,9 @@ computer's vital signs. One compact city island, districts packed tight:
   Download -> Blue expressway cutting through the island (glowing pods)
   Upload   -> Purple expressway crossing it (glowing pods, light trails)
   Disk     -> Lime storage docks (warehouses, cranes, trucks, front-left)
+  GPU      -> Magenta fusion reactor on its own satellite platform
+              (core pulse = load, core colour = temperature, fuel
+              rods = VRAM, cooling-tower steam = heat)
   Stress   -> Red beacons, drones, rain, lightning, emergency pods
 
 The 3D look is faked entirely with 2D shapes: isometric boxes with lit
@@ -32,6 +35,11 @@ try:
 except ImportError:  # graceful fallback: demo mode only
     psutil = None
 
+try:
+    import pynvml
+except ImportError:  # graceful fallback: nvidia-smi or demo values
+    pynvml = None
+
 # ----------------------------------------------------------------------------
 # Config / palette
 # ----------------------------------------------------------------------------
@@ -53,7 +61,20 @@ RAM_COLOR = (0, 224, 255)           # bright cyan
 DOWN_COLOR = (52, 130, 255)         # bright blue
 UP_COLOR = (178, 74, 255)           # purple
 DISK_COLOR = (128, 255, 64)         # lime green
+GPU_COLOR = (255, 64, 200)          # hot magenta
 STRESS_COLOR = (255, 46, 64)        # red
+
+# reactor-core temperature gradient (cool -> warm -> critical)
+GPU_TEMP_COOL = (60, 220, 255)      # icy cyan      (~<50 C)
+GPU_TEMP_WARM = (255, 170, 40)      # furnace amber (~70 C)
+GPU_TEMP_HOT = (255, 60, 60)        # red-hot       (~85+ C)
+
+
+def gpu_temp_color(temp_n):
+    """0..1 normalised core temperature -> glow colour."""
+    if temp_n < 0.55:
+        return mix(GPU_TEMP_COOL, GPU_TEMP_WARM, clamp(temp_n / 0.55))
+    return mix(GPU_TEMP_WARM, GPU_TEMP_HOT, clamp((temp_n - 0.55) / 0.45))
 
 HUD_RECT = pygame.Rect(988, 18, 276, 764)
 
@@ -210,6 +231,81 @@ class MetricsProvider:
             pass
 
 
+class GpuMetrics:
+    """GPU load / temperature / VRAM. Prefers NVML (nvidia-ml-py); falls
+    back to polling nvidia-smi on a background thread; else unavailable."""
+
+    SAMPLE_EVERY = 1.0
+
+    def __init__(self):
+        self.util = 0.0          # %
+        self.temp = 0.0          # degrees C
+        self.vram_used = 0.0     # bytes
+        self.vram_total = 0.0
+        self._timer = self.SAMPLE_EVERY   # sample immediately on first update
+        self._handle = None
+        self.available = False
+        if pynvml is not None:
+            try:
+                pynvml.nvmlInit()
+                self._handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+                self.available = True
+            except Exception:
+                self._handle = None
+        if not self.available:
+            self.available = self._start_smi_thread()
+
+    # -- nvidia-smi fallback (subprocess polled off the render thread) -------
+
+    def _start_smi_thread(self):
+        import shutil
+        if shutil.which("nvidia-smi") is None:
+            return False
+        import threading
+        threading.Thread(target=self._smi_loop, daemon=True).start()
+        return True
+
+    def _smi_loop(self):
+        import subprocess
+        import time
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        query = ("--query-gpu=utilization.gpu,temperature.gpu,"
+                 "memory.used,memory.total")
+        while True:
+            try:
+                out = subprocess.check_output(
+                    ["nvidia-smi", query, "--format=csv,noheader,nounits"],
+                    creationflags=flags, timeout=5, text=True)
+                u, tc, mu, mt = out.strip().splitlines()[0].split(",")
+                self.util = float(u)
+                self.temp = float(tc)
+                self.vram_used = float(mu) * MB
+                self.vram_total = float(mt) * MB
+            except Exception:
+                pass
+            time.sleep(1.5)
+
+    # -- NVML sampling --------------------------------------------------------
+
+    def update(self, dt):
+        if self._handle is None:
+            return               # smi thread (or nothing) feeds the fields
+        self._timer += dt
+        if self._timer < self.SAMPLE_EVERY:
+            return
+        self._timer = 0.0
+        try:
+            self.util = float(
+                pynvml.nvmlDeviceGetUtilizationRates(self._handle).gpu)
+            self.temp = float(pynvml.nvmlDeviceGetTemperature(
+                self._handle, pynvml.NVML_TEMPERATURE_GPU))
+            mem = pynvml.nvmlDeviceGetMemoryInfo(self._handle)
+            self.vram_used = float(mem.used)
+            self.vram_total = float(mem.total)
+        except Exception:
+            pass
+
+
 class DemoMetrics:
     """Synthetic, slowly-evolving metrics for demo mode."""
 
@@ -221,7 +317,13 @@ class DemoMetrics:
         ul = max(0.0, (0.8 + 0.7 * math.sin(t * 0.4 + 3) + burst * 2.4) * MB)
         dr = max(0.0, (7 + 9 * math.sin(t * 0.7 + 1) + burst * 45) * MB)
         dw = max(0.0, (4 + 6 * math.sin(t * 0.55 + 4) + burst * 25) * MB)
-        return cpu, ram, dl, ul, dr, dw
+        gpu = clamp(38 + 34 * math.sin(t * 0.27 + 4.1) + 9 * math.sin(t * 1.3)
+                    + burst * 34, 1, 99)
+        gtemp = clamp(47 + 20 * math.sin(t * 0.19 + 4.6) + burst * 22, 34, 93)
+        gvram_total = 8.0 * KB * MB
+        gvram = clamp(0.42 + 0.30 * math.sin(t * 0.13 + 1.1) + burst * 0.18,
+                      0.05, 0.97) * gvram_total
+        return cpu, ram, dl, ul, dr, dw, gpu, gtemp, gvram, gvram_total
 
 
 # ----------------------------------------------------------------------------
@@ -511,6 +613,201 @@ class Streetlight:
                            (self.x + 4, self.y - 12), 2)
         blit_glow(surf, (self.x + 4, self.y - 12), 9, c, f)
         blit_glow(surf, (self.x + 3, self.y + 2), 7, c, f * 0.45)
+
+
+class Reactor:
+    """GPU fusion reactor on its own satellite platform: a containment
+    ring holding a floating plasma core. Core pulse rate & orbiting
+    charge = GPU load, core colour = temperature (icy cyan -> red-hot),
+    fuel rods fill with VRAM, twin cooling towers vent steam with heat,
+    and past ~82 C the whole site strobes red."""
+
+    metric = "gpu"
+
+    CX_G, CY_G = 27.0, 18.0            # platform centre in grid coords
+    RODS = 8
+
+    def __init__(self):
+        self.city = None               # wired up by City after construction
+        self.key = self.CX_G + self.CY_G + 6.0     # frontmost in draw order
+        self.cx, self.cy = iso(self.CX_G, self.CY_G)
+        self.phase = random.uniform(0, math.tau)
+        self.towers = [(-74, -16, 76), (78, -12, 88)]   # dx, dy, height
+        self.steam = []                # [x, y, vx, vy, age, life, size]
+        self.arcs = []                 # [points, life]
+        self._last_t = None
+        self.sign = self._make_sign("GPU CORE", GPU_COLOR)
+        self.warn_sign = self._make_sign("OVERHEAT", STRESS_COLOR)
+
+    @staticmethod
+    def _make_sign(text, color):
+        f = sysfont(11, bold=True)
+        txt = f.render(text, True, mix(color, (255, 255, 255), 0.35))
+        board = pygame.Surface((txt.get_width() + 10, txt.get_height() + 5))
+        board.fill((10, 12, 22))
+        pygame.draw.rect(board, col_scale(color, 0.85), board.get_rect(), 1)
+        board.blit(txt, (5, 2))
+        return board
+
+    # -- steam puffs ----------------------------------------------------------
+
+    def _update_steam(self, dt, temp_n, util):
+        rate = 1.5 + temp_n * 16 + util * 4      # puffs / second, both towers
+        if dt > 0 and random.random() < rate * dt:
+            dx, dy, h = random.choice(self.towers)
+            self.steam.append([self.cx + dx + random.uniform(-5, 5),
+                               self.cy + dy - h - 3,
+                               random.uniform(2, 9),
+                               -random.uniform(14, 24 + 34 * temp_n),
+                               0.0, random.uniform(2.0, 3.4),
+                               random.uniform(3, 7)])
+        alive = []
+        for p in self.steam:
+            p[0] += p[2] * dt
+            p[1] += p[3] * dt
+            p[2] += 4.0 * dt                     # wind drift
+            p[4] += dt
+            if p[4] < p[5]:
+                alive.append(p)
+        self.steam = alive
+
+    # -- one cooling tower ----------------------------------------------------
+
+    def _tower(self, surf, t, x, base_y, h, temp_n, alarm):
+        left, right = [], []
+        for i in range(6):
+            u = i / 5.0
+            w = lerp(21, 15, u) - 6 * math.sin(u * math.pi)   # hyperboloid
+            y = base_y - u * h
+            left.append((x - w, y))
+            right.append((x + w, y))
+        pygame.draw.polygon(surf, mix((15, 18, 33), GPU_COLOR, 0.06),
+                            left + right[::-1])
+        pygame.draw.lines(surf, (30, 36, 60), False, left, 1)
+        pygame.draw.lines(surf, (52, 60, 94), False, right, 1)
+        # mouth + heat glow rising out of the throat
+        rim = pygame.Rect(0, 0, 30, 9)
+        rim.center = (x, base_y - h)
+        pygame.draw.ellipse(surf, (8, 10, 20), rim)
+        pygame.draw.ellipse(surf, col_scale(GPU_COLOR, 0.35), rim, 1)
+        blit_glow(surf, rim.center, 13, gpu_temp_color(temp_n),
+                  0.12 + 0.38 * temp_n)
+        # red strobes when the core runs critical
+        if alarm > 0.02 and math.sin(t * 10 + x) > 0:
+            pygame.draw.circle(surf, STRESS_COLOR, (x, base_y - h - 5), 2)
+            blit_glow(surf, (x, base_y - h - 5), 11, STRESS_COLOR, alarm)
+
+    # -- full reactor ---------------------------------------------------------
+
+    def draw(self, surf, t, activity, stress):
+        util = activity
+        temp_n = self.city.gtemp_n if self.city else 0.0
+        vram_n = self.city.gvram_n if self.city else 0.0
+        core_c = gpu_temp_color(temp_n)
+        alarm = clamp((temp_n - 0.80) / 0.20)
+        dt = 0.0 if self._last_t is None else clamp(t - self._last_t, 0.0, 0.1)
+        self._last_t = t
+        cx, cy = self.cx, self.cy
+
+        # cooling towers behind the core, plus their steam
+        for dx, dy, h in self.towers:
+            self._tower(surf, t, cx + dx, cy + dy, h, temp_n, alarm)
+        self._update_steam(dt, temp_n, util)
+        for x, y, _, _, age, life, size in self.steam:
+            f = 1.0 - age / life
+            blit_glow(surf, (x, y), int(size + age * 7), (150, 160, 185),
+                      0.20 * f * (0.35 + 0.65 * temp_n))
+
+        # containment pad + ring wall (an open iso cylinder)
+        pad = pygame.Rect(0, 0, 168, 82)
+        pad.center = (cx, cy + 2)
+        pygame.draw.ellipse(surf, (14, 17, 32), pad)
+        pygame.draw.ellipse(surf, col_scale(GPU_COLOR, 0.28 + 0.30 * util),
+                            pad, 1)
+        base = pygame.Rect(0, 0, 112, 54)
+        base.center = (cx, cy - 4)
+        top = base.move(0, -24)
+        wallc = mix((16, 19, 36), GPU_COLOR, 0.09 + 0.08 * util)
+        pygame.draw.rect(surf, wallc,
+                         (base.left, top.centery, base.width,
+                          base.centery - top.centery))
+        pygame.draw.ellipse(surf, wallc, base)
+        pygame.draw.ellipse(surf, (9, 11, 23), top)             # open mouth
+        blit_glow(surf, top.center, 42, core_c, 0.10 + 0.35 * util)
+        pygame.draw.ellipse(surf, col_scale(GPU_COLOR, 0.40 + 0.45 * util),
+                            top, 2)
+
+        # VRAM fuel rods standing in the ring
+        lit = int(round(vram_n * self.RODS))
+        for i in range(self.RODS):
+            a = math.tau * i / self.RODS + 0.4
+            rx = cx + 40 * math.cos(a)
+            ry = top.centery + 4 + 17 * math.sin(a)
+            if i < lit:
+                pygame.draw.line(surf, col_scale(GPU_COLOR, 0.9),
+                                 (rx, ry), (rx, ry - 15), 3)
+                blit_glow(surf, (rx, ry - 8), 7, GPU_COLOR, 0.5)
+            else:
+                pygame.draw.line(surf, (30, 27, 46), (rx, ry), (rx, ry - 15), 3)
+
+        # plasma core: column + floating orb, pulsing with load
+        pulse = 0.5 + 0.5 * math.sin(t * (1.5 + util * 9.0) + self.phase)
+        core_y = cy - 62 - 4 * pulse
+        r = 9 + 7 * util + 3 * pulse * util
+        pygame.draw.line(surf, col_scale(core_c, 0.30 + 0.55 * util),
+                         (cx, top.centery + 2), (cx, core_y), 3)
+        blit_glow(surf, (cx, (top.centery + core_y) / 2), 16, core_c,
+                  0.06 + 0.28 * util)
+        blit_glow(surf, (cx, core_y), int(r * 3.1), core_c,
+                  0.30 + 0.50 * (0.35 + 0.65 * util) * (0.6 + 0.4 * pulse))
+        pygame.draw.circle(surf, col_scale(core_c, 0.55 + 0.45 * pulse),
+                           (cx, int(core_y)), int(r))
+        pygame.draw.circle(surf,
+                           mix(core_c, (255, 255, 255), 0.45 + 0.4 * pulse),
+                           (cx, int(core_y)), max(2, int(r * 0.45)))
+
+        # charge particles orbiting the core
+        n_orb = 2 + int(util * 5)
+        for i in range(n_orb):
+            a = t * (1.6 + util * 4.5) + i * math.tau / n_orb + self.phase
+            ox = cx + math.cos(a) * (r + 15)
+            oy = core_y + math.sin(a) * (r + 15) * 0.38
+            pygame.draw.circle(surf, mix(core_c, (255, 255, 255), 0.5),
+                               (int(ox), int(oy)), 2)
+            blit_glow(surf, (ox, oy), 6, core_c, 0.5)
+
+        # crackling arcs from the orb down to the containment rim
+        self.arcs = [[pts, life - dt * 5] for pts, life in self.arcs
+                     if life > dt * 5]
+        if util > 0.45 and random.random() < dt * (2 + 9 * util):
+            ang = random.uniform(0, math.tau)
+            ax = cx + 52 * math.cos(ang)
+            ay = top.centery + 23 * math.sin(ang)
+            mid = ((cx + ax) / 2 + random.uniform(-9, 9),
+                   (core_y + ay) / 2 + random.uniform(-9, 9))
+            self.arcs.append([[(cx, core_y), mid, (ax, ay)], 1.0])
+        for pts, life in self.arcs:
+            pygame.draw.lines(surf, col_scale(mix(core_c, (255, 255, 255),
+                                                  0.4), life), False, pts, 1)
+
+        # critical-temperature alarm: rim strobe over the whole ring
+        if alarm > 0.02 and math.sin(t * 10) > 0:
+            pygame.draw.ellipse(surf, col_scale(STRESS_COLOR,
+                                                0.4 + 0.6 * alarm), pad, 2)
+            blit_glow(surf, top.center, 60, STRESS_COLOR, 0.45 * alarm)
+
+        # neon site sign (flips to OVERHEAT while critical)
+        sign = self.warn_sign if (alarm > 0.02 and int(t * 3) % 2) else self.sign
+        sc = STRESS_COLOR if sign is self.warn_sign else GPU_COLOR
+        px, py = cx + 58, cy + 12
+        sw, sh = sign.get_size()
+        by = py - 48
+        pygame.draw.line(surf, (60, 70, 100), (px, py), (px, by + sh))
+        surf.blit(sign, (px - sw // 2, by))
+        blit_glow(surf, (px, by + sh // 2), sw, sc, 0.22 + 0.28 * util)
+
+        # wet reflection of the core in the sea below the platform
+        blit_glow(surf, (cx, cy + 66), 26, core_c, 0.10 + 0.22 * util)
 
 
 # ----------------------------------------------------------------------------
@@ -824,6 +1121,8 @@ class City:
                               (17.8, 8.6), (11.0, 8.6)], loop=True)
         self.disk_loop = Path([(1.0, 11.4), (9.6, 11.4),
                                (9.6, 18.8), (1.0, 18.8)], loop=True)
+        # energy conduit: reactor platform -> city (flow runs toward town)
+        self.conduit_path = Path([(25.6, 16.6), (20.1, 13.0)])
 
         scene = []
 
@@ -871,6 +1170,11 @@ class City:
         for gy in (2.5, 5.5, 12.5, 15.5, 18.5):
             scene.append(Streetlight(11.7, gy, UP_COLOR, "ul"))
 
+        # GPU fusion reactor on its satellite platform (front-right)
+        self.reactor = Reactor()
+        self.reactor.city = self
+        scene.append(self.reactor)
+
         self.scene = sorted(scene, key=lambda o: o.key)
 
         self.fleets = [
@@ -898,9 +1202,12 @@ class City:
         # smoothed display metrics
         self.cpu = self.ram = 0.0
         self.dl = self.ul = self.dr = self.dw = 0.0
+        self.gpu = self.gtemp = self.gvu = self.gvt = 0.0
+        self.gtemp_n = self.gvram_n = 0.0
+        self.gpu_available = True      # App flips this off if no NVIDIA GPU
         self.stress = 0.0
         self.spike = 0.0
-        self.n = dict(cpu=0.0, ram=0.0, dl=0.0, ul=0.0, disk=0.0)
+        self.n = dict(cpu=0.0, ram=0.0, dl=0.0, ul=0.0, disk=0.0, gpu=0.0)
 
     # -- static art ----------------------------------------------------------
 
@@ -965,6 +1272,32 @@ class City:
             f = max(0.0, 1.0 - i / 22)
             pygame.draw.line(bg, mix((11, 14, 32), (20, 27, 54), f),
                              (PL[0] + i * 6, yy), (PR[0] - i * 6, yy))
+
+        # GPU reactor satellite platform + energy conduit (front-right) -------
+        bake_road(bg, self.conduit_path, GPU_COLOR)
+        RT, RR = iso(24, 15), iso(30, 15)
+        RB2, RL2 = iso(30, 21), iso(24, 21)
+        SD2 = 18
+        pygame.draw.polygon(bg, (8, 10, 20),
+                            [RL2, RB2, (RB2[0], RB2[1] + SD2),
+                             (RL2[0], RL2[1] + SD2)])
+        pygame.draw.polygon(bg, (11, 13, 25),
+                            [RB2, RR, (RR[0], RR[1] + SD2),
+                             (RB2[0], RB2[1] + SD2)])
+        pygame.draw.polygon(bg, (13, 16, 30), [RT, RR, RB2, RL2])
+        for i in (2, 4):
+            pygame.draw.line(bg, (20, 26, 48), iso(24 + i, 15), iso(24 + i, 21))
+            pygame.draw.line(bg, (20, 26, 48), iso(24, 15 + i), iso(30, 15 + i))
+        pygame.draw.lines(bg, (52, 70, 116), True, [RT, RR, RB2, RL2], 1)
+        pygame.draw.line(bg, col_scale(GPU_COLOR, 0.35), RL2, RB2)
+        pygame.draw.line(bg, col_scale(GPU_COLOR, 0.35), RB2, RR)
+        pygame.draw.line(bg, col_scale(GPU_COLOR, 0.14),
+                         (RL2[0], RL2[1] + SD2), (RB2[0], RB2[1] + SD2))
+        pygame.draw.line(bg, col_scale(GPU_COLOR, 0.14),
+                         (RB2[0], RB2[1] + SD2), (RR[0], RR[1] + SD2))
+        blit_glow(bg, iso(27, 18), 110, GPU_COLOR, 0.10)
+        blit_glow(bg, (RB2[0], RB2[1] + 40), 120, GPU_COLOR, 0.05)
+
         blit_glow(bg, (PB[0], PB[1] + 60), 190, RAM_COLOR, 0.05)
         blit_glow(bg, (PB[0] - 180, PB[1] + 40), 150, DISK_COLOR, 0.04)
         blit_glow(bg, (PB[0] + 180, PB[1] + 40), 150, CPU_COLOR, 0.05)
@@ -986,7 +1319,7 @@ class City:
         self.spike = random.uniform(0.55, 1.0)
 
     def update(self, dt, t, raw):
-        cpu, ram, dl, ul, dr, dw = raw
+        cpu, ram, dl, ul, dr, dw, gpu, gtemp, gvu, gvt = raw
         s = clamp(dt * 3.2)          # smoothing factor
         self.cpu = lerp(self.cpu, cpu, s)
         self.ram = lerp(self.ram, ram, s)
@@ -994,6 +1327,10 @@ class City:
         self.ul = lerp(self.ul, ul, s)
         self.dr = lerp(self.dr, dr, s)
         self.dw = lerp(self.dw, dw, s)
+        self.gpu = lerp(self.gpu, gpu, s)
+        self.gtemp = lerp(self.gtemp, gtemp, s)
+        self.gvu = lerp(self.gvu, gvu, s)
+        self.gvt = gvt               # capacity: no smoothing needed
 
         self.spike = max(0.0, self.spike - dt * 0.075)
 
@@ -1002,10 +1339,17 @@ class City:
         dl_n = clamp(soft_norm(self.dl, 2.5 * MB) + self.spike * 0.45)
         ul_n = clamp(soft_norm(self.ul, 1.2 * MB) + self.spike * 0.45)
         disk_n = clamp(soft_norm(self.dr + self.dw, 24 * MB) + self.spike * 0.45)
-        self.n = dict(cpu=cpu_n, ram=ram_n, dl=dl_n, ul=ul_n, disk=disk_n)
+        gpu_n = clamp(self.gpu / 100 + self.spike * 0.4)
+        # ~30 C reads as cold, ~92 C as critical
+        self.gtemp_n = clamp((self.gtemp - 30.0) / 62.0 + self.spike * 0.25)
+        self.gvram_n = clamp(self.gvu / self.gvt) if self.gvt > 0 else 0.0
+        self.n = dict(cpu=cpu_n, ram=ram_n, dl=dl_n, ul=ul_n, disk=disk_n,
+                      gpu=gpu_n)
 
-        stress_target = clamp(0.5 * cpu_n + 0.28 * ram_n + 0.18 * disk_n
-                              + 0.12 * max(dl_n, ul_n) + self.spike * 0.8)
+        stress_target = clamp(0.40 * cpu_n + 0.22 * ram_n
+                              + 0.20 * max(gpu_n, self.gtemp_n)
+                              + 0.14 * disk_n
+                              + 0.10 * max(dl_n, ul_n) + self.spike * 0.8)
         self.stress = lerp(self.stress, stress_target, clamp(dt * 1.6))
         st = self.stress
 
@@ -1057,6 +1401,8 @@ class City:
         draw_road_flow(surf, self.ul_path, UP_COLOR, n["ul"], t)
         draw_road_flow(surf, self.cpu_loop, CPU_COLOR, n["cpu"] * 0.8, t)
         draw_road_flow(surf, self.disk_loop, DISK_COLOR, n["disk"] * 0.8, t)
+        # reactor power surging along the conduit into the city
+        draw_road_flow(surf, self.conduit_path, GPU_COLOR, n["gpu"], t)
 
         # central interchange pulse where the two expressways cross
         beat = 0.5 + 0.5 * math.sin(t * (2 + n["cpu"] * 5))
@@ -1155,9 +1501,20 @@ class HUD:
 
         # metric rows
         n = city.n
+        gpu_ok = city.gpu_available or not live_mode
+        gb = KB * MB
         rows = [
             ("CPU LOAD",  f"{city.cpu:4.0f} %",      n["cpu"],  CPU_COLOR),
             ("MEMORY",    f"{city.ram:4.0f} %",      n["ram"],  RAM_COLOR),
+            ("GPU LOAD",  f"{city.gpu:4.0f} %" if gpu_ok else "  --",
+             n["gpu"] if gpu_ok else 0.0,                       GPU_COLOR),
+            ("GPU CORE",  f"{city.gtemp:4.0f} °C" if gpu_ok else "  --",
+             city.gtemp_n if gpu_ok else 0.0,
+             gpu_temp_color(city.gtemp_n)),
+            ("GPU VRAM",
+             f"{city.gvu / gb:4.1f}/{city.gvt / gb:.1f} GB" if gpu_ok
+             else "  --",
+             city.gvram_n if gpu_ok else 0.0,                   GPU_COLOR),
             ("DOWNLINK",  fmt_speed(city.dl),        n["dl"],   DOWN_COLOR),
             ("UPLINK",    fmt_speed(city.ul),        n["ul"],   UP_COLOR),
             ("DISK READ", fmt_speed(city.dr),        n["disk"], DISK_COLOR),
@@ -1167,7 +1524,7 @@ class HUD:
         y = 104
         for label, value, frac, color in rows:
             self._row(p, t, y, w, label, value, frac, color)
-            y += 58
+            y += 52
 
         # stress meter -------------------------------------------------------
         y += 6
@@ -1274,6 +1631,7 @@ DISTRICT_LABELS = [
     ("STORAGE DOCKS · DISK", (58, 330), DISK_COLOR),
     ("DOWNLINK EXPRESSWAY", (56, 214), DOWN_COLOR),
     ("UPLINK EXPRESSWAY", (128, 546), UP_COLOR),
+    ("FUSION REACTOR · GPU", (836, 592), GPU_COLOR),
 ]
 
 
@@ -1290,11 +1648,16 @@ class App:
         self.city = City()
         self.hud = HUD(HUD_RECT)
         self.metrics = MetricsProvider()
+        self.gpu_metrics = GpuMetrics()
+        self.city.gpu_available = self.gpu_metrics.available
         self.demo = DemoMetrics()
         self.live_mode = self.metrics.available and smoke_dir is None
         if not self.metrics.available:
             print("psutil unavailable - running in demo mode. "
                   "Install it with: pip install psutil")
+        if not self.gpu_metrics.available:
+            print("No NVIDIA GPU telemetry found - the reactor idles cold "
+                  "in live mode. Install it with: pip install nvidia-ml-py")
         self.f_label = sysfont(11, bold=True)
         self.paused = False
         self.t = 0.0
@@ -1338,8 +1701,11 @@ class App:
                 self.t += dt
                 if self.live_mode:
                     self.metrics.update(dt)
+                    self.gpu_metrics.update(dt)
+                    g = self.gpu_metrics
                     raw = (self.metrics.cpu, self.metrics.ram, self.metrics.dl,
-                           self.metrics.ul, self.metrics.disk_r, self.metrics.disk_w)
+                           self.metrics.ul, self.metrics.disk_r, self.metrics.disk_w,
+                           g.util, g.temp, g.vram_used, g.vram_total)
                 else:
                     raw = self.demo.sample(self.t)
                 self.city.update(dt, self.t, raw)
